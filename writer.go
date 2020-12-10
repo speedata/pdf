@@ -48,7 +48,6 @@ func (pg *PDFPage) Runes(fnt *PDFFont, r string) {
 	for _, v := range r {
 		fnt.usedChar[v] = true
 	}
-	fmt.Println(fnt.usedChar)
 }
 
 // Add page to the file. The stream must be complete
@@ -151,7 +150,7 @@ func (pw *Writer) writeDocumentCatalog() (objectnumber, error) {
 	return catalog.ObjectNumber, nil
 }
 
-// Does not close the file
+// Finish writes the trailer and xref section but does not close the file
 func (pw *Writer) Finish() error {
 	fmt.Println("Now finishing the PDF")
 	dc, err := pw.writeDocumentCatalog()
@@ -171,7 +170,7 @@ func (pw *Writer) Finish() error {
 	}
 
 	trailer := Dict{
-		"/Size": fmt.Sprint(pw.nextobject - 1),
+		"/Size": fmt.Sprint(pw.nextobject),
 		"/Root": fmt.Sprintf("%d 0 R", dc),
 		"/ID":   "[<72081BF410BDCCB959F83B2B25A355D7> <72081BF410BDCCB959F83B2B25A355D7>]",
 	}
@@ -179,7 +178,8 @@ func (pw *Writer) Finish() error {
 	pw.outHash(trailer)
 	fmt.Fprintln(pw.outfile, "startxref")
 	fmt.Fprintf(pw.outfile, "%d\n", xrefpos)
-	fmt.Fprintln(pw.outfile, "%%EOF")
+	eofmarker := "%%EOF"
+	fmt.Fprintln(pw.outfile, eofmarker)
 	return nil
 }
 

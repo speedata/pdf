@@ -55,7 +55,7 @@ func (fnt *PDFFont) finish() error {
 
 		usedChars := make(RuneSlice, len(fnt.usedChar))
 		i := 0
-		for g, _ := range fnt.usedChar {
+		for g := range fnt.usedChar {
 			usedChars[i] = g
 			i++
 		}
@@ -116,6 +116,7 @@ func (fnt *PDFFont) finish() error {
 	return nil
 }
 
+// NewPDFFont registers a font for use in the PDF file.
 func (pw *Writer) NewPDFFont(filename string) *PDFFont {
 	f := &PDFFont{}
 	f.usedChar = make(map[rune]bool)
