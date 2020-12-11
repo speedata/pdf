@@ -10,62 +10,72 @@ import (
 
 type objectnumber int
 
+func (o objectnumber) ref() string {
+	return fmt.Sprintf("%d 0 R", o)
+}
+
+// Dict is a string - string dictionary
 type Dict map[string]string
 
-type Writer struct {
+// PDF is the central point of writing a PDF file.
+type PDF struct {
 	outfile         io.WriteSeeker
 	nextobject      objectnumber
 	objectlocations map[objectnumber]int64
-	pages           *PDFPages
+	pages           *Pages
 	lastEOL         int64
-	fonts           []*PDFFont
+	fonts           []*Font
 }
 
-func NewWriter(file io.WriteSeeker) *Writer {
-	pw := Writer{}
+// NewPDF creates a PDF file writing to file
+func NewPDF(file io.WriteSeeker) *PDF {
+	pw := PDF{}
 	pw.outfile = file
 	pw.nextobject = 1
 	pw.objectlocations = make(map[objectnumber]int64)
-	pw.pages = &PDFPages{}
+	pw.pages = &Pages{}
 	pw.out("%PDF-1.7")
 	return &pw
 }
 
-type PDFPages struct {
-	pages []*PDFPage
-	dict  objectnumber
+// Pages is the parent page structure
+type Pages struct {
+	pages   []*Page
+	dictnum objectnumber
 }
 
-type PDFPage struct {
-	onum   objectnumber
-	dict   objectnumber
-	Fonts  []*PDFFont
-	stream *PDFStream
+// Page contains information about a single page
+type Page struct {
+	onum    objectnumber
+	dictnum objectnumber
+	Fonts   []*Font
+	stream  *Stream
 }
 
-// Register the used characters
-func (pg *PDFPage) Runes(fnt *PDFFont, r string) {
+// RegisterChars tells the PDF file which fonts are used on a page and which characters are included.
+// The string r must include every used char in this font in any order at least once.
+func (pg *Page) RegisterChars(fnt *Font, r string) {
 	for _, v := range r {
 		fnt.usedChar[v] = true
 	}
 }
 
-// Add page to the file. The stream must be complete
-func (pw *Writer) AddPage(pagestream *PDFStream) *PDFPage {
-	pg := &PDFPage{}
+// AddPage adds a page to the PDF file. The stream must be complete.
+func (pw *PDF) AddPage(pagestream *Stream) *Page {
+	pg := &Page{}
 	pg.stream = pagestream
 	pw.pages.pages = append(pw.pages.pages, pg)
 	return pg
 }
 
 // Get next free object number
-func (pw *Writer) nextObject() objectnumber {
+func (pw *PDF) nextObject() objectnumber {
 	pw.nextobject++
 	return pw.nextobject - 1
 }
 
-func (pw *Writer) writeStream(st *PDFStream) objectnumber {
-	obj := pw.NewPDFObject()
+func (pw *PDF) writeStream(st *Stream) objectnumber {
+	obj := pw.NewObject()
 	st.dict["/Length"] = fmt.Sprintf("%d", len(st.data))
 	obj.Dict(st.dict)
 	obj.Data.WriteString("\nstream\n")
@@ -75,7 +85,7 @@ func (pw *Writer) writeStream(st *PDFStream) objectnumber {
 	return obj.ObjectNumber
 }
 
-func (pw *Writer) writeDocumentCatalog() (objectnumber, error) {
+func (pw *PDF) writeDocumentCatalog() (objectnumber, error) {
 	// Write all page streams:
 	for _, page := range pw.pages.pages {
 		page.onum = pw.writeStream(page.stream)
@@ -86,18 +96,18 @@ func (pw *Writer) writeDocumentCatalog() (objectnumber, error) {
 	// Pages objects have to be placed in the file
 
 	//  We need to know in advance where the parent object is written (/Pages)
-	pagesObj := pw.NewPDFObject()
+	pagesObj := pw.NewObject()
 
 	for _, page := range pw.pages.pages {
-		obj := pw.NewPDFObject()
+		obj := pw.NewObject()
 		onum := obj.ObjectNumber
-		page.dict = onum
+		page.dictnum = onum
 
 		var res []string
 		if len(page.Fonts) > 0 {
 			res = append(res, "<< ")
 			for _, fnt := range page.Fonts {
-				res = append(res, fmt.Sprintf("%s %d 0 R", fnt.InternalName, fnt.fontobject.ObjectNumber))
+				res = append(res, fmt.Sprintf("%s %s", fnt.InternalName, fnt.fontobject.ObjectNumber.ref()))
 			}
 			res = append(res, " >>")
 		}
@@ -108,8 +118,8 @@ func (pw *Writer) writeDocumentCatalog() (objectnumber, error) {
 		}
 		pageHash := Dict{
 			"/Type":     "/Page",
-			"/Contents": fmt.Sprintf("%d 0 R", page.onum),
-			"/Parent":   fmt.Sprintf("%d 0 R", pagesObj.ObjectNumber),
+			"/Contents": page.onum.ref(),
+			"/Parent":   pagesObj.ObjectNumber.ref(),
 		}
 
 		resHash["/ProcSet"] = "[ /PDF /Text ]"
@@ -123,11 +133,11 @@ func (pw *Writer) writeDocumentCatalog() (objectnumber, error) {
 	// The pages object
 	kids := make([]string, len(pw.pages.pages))
 	for i, v := range pw.pages.pages {
-		kids[i] = fmt.Sprintf("%d 0 R", v.dict)
+		kids[i] = v.dictnum.ref()
 	}
 
 	fmt.Fprintln(pw.outfile, "%% The pages object")
-	pw.pages.dict = pagesObj.ObjectNumber
+	pw.pages.dictnum = pagesObj.ObjectNumber
 	pagesObj.Dict(Dict{
 		"/Type":  "/Pages",
 		"/Kids":  "[ " + strings.Join(kids, " ") + " ]",
@@ -137,13 +147,15 @@ func (pw *Writer) writeDocumentCatalog() (objectnumber, error) {
 	})
 	pagesObj.Save()
 
-	catalog := pw.NewPDFObject()
+	catalog := pw.NewObject()
+	catalog.comment = "Catalog"
 	catalog.Dict(Dict{
 		"/Type":  "/Catalog",
-		"/Pages": fmt.Sprintf("%d 0 R", pw.pages.dict),
+		"/Pages": pw.pages.dictnum.ref(),
 	})
 	catalog.Save()
 
+	// write out all font descriptors and files into the PDF
 	for _, fnt := range pw.fonts {
 		fnt.finish()
 	}
@@ -151,7 +163,7 @@ func (pw *Writer) writeDocumentCatalog() (objectnumber, error) {
 }
 
 // Finish writes the trailer and xref section but does not close the file
-func (pw *Writer) Finish() error {
+func (pw *PDF) Finish() error {
 	fmt.Println("Now finishing the PDF")
 	dc, err := pw.writeDocumentCatalog()
 	if err != nil {
@@ -171,7 +183,7 @@ func (pw *Writer) Finish() error {
 
 	trailer := Dict{
 		"/Size": fmt.Sprint(pw.nextobject),
-		"/Root": fmt.Sprintf("%d 0 R", dc),
+		"/Root": dc.ref(),
 		"/ID":   "[<72081BF410BDCCB959F83B2B25A355D7> <72081BF410BDCCB959F83B2B25A355D7>]",
 	}
 	fmt.Fprintln(pw.outfile, "trailer")
@@ -195,30 +207,30 @@ func hashToString(h Dict, level int) string {
 	return b.String()
 }
 
-func (pw *Writer) outHash(h Dict) {
+func (pw *PDF) outHash(h Dict) {
 	pw.out(hashToString(h, 0))
 }
 
 // Write an end of line (EOL) marker to the file if it is not on a EOL already.
-func (pw *Writer) eol() {
+func (pw *PDF) eol() {
 	if curpos := pw.curpos(); curpos != pw.lastEOL {
 		fmt.Fprintln(pw.outfile, "")
 		pw.lastEOL = curpos
 	}
 }
 
-func (pw *Writer) out(str string) {
+func (pw *PDF) out(str string) {
 	fmt.Fprintln(pw.outfile, str)
 	pw.lastEOL = pw.curpos()
 }
 
 // Write a formatted string to the PDF file
-func (pw *Writer) outf(format string, str ...interface{}) {
+func (pw *PDF) outf(format string, str ...interface{}) {
 	fmt.Fprintf(pw.outfile, format, str...)
 }
 
 // Return the current position in the PDF file. Panics if something is wrong.
-func (pw *Writer) curpos() int64 {
+func (pw *PDF) curpos() int64 {
 	pos, err := pw.outfile.Seek(0, os.SEEK_CUR)
 	if err != nil {
 		panic(err)
@@ -227,7 +239,7 @@ func (pw *Writer) curpos() int64 {
 }
 
 // Write a start object marker with the next free object.
-func (pw *Writer) startObject(onum objectnumber) error {
+func (pw *PDF) startObject(onum objectnumber) error {
 	var position int64
 	position = pw.curpos() + 1
 	pw.objectlocations[onum] = position
@@ -236,7 +248,7 @@ func (pw *Writer) startObject(onum objectnumber) error {
 }
 
 // Write a simple "endobj" to the PDF file. Return the object number.
-func (pw *Writer) endObject() objectnumber {
+func (pw *PDF) endObject() objectnumber {
 	onum := pw.nextobject
 	pw.eol()
 	pw.out("endobj")

@@ -11,21 +11,24 @@ import (
 
 var internalfontnumber int
 
-type PDFFont struct {
-	pw           *Writer
+// Font is any kind of font for the PDF file (currently only type1 is supported)
+type Font struct {
+	pw           *PDF
 	InternalName string
-	fontobject   *PDFObject
+	fontobject   *Object
 	FontFile     objectnumber
 	filename     string
 	usedChar     map[rune]bool
 }
 
 const (
+	// TYPE1 represents a afm/pfm based font
 	TYPE1 int = iota
+	// TRUETYPE is a TrueType based OpenType font
 	TRUETYPE
 )
 
-func guessFonttype(filename string) int {
+func (fnt *Font) fonttype() int {
 	return TYPE1
 }
 
@@ -34,38 +37,35 @@ func newInternalFontName() string {
 	return fmt.Sprintf("/F%d", internalfontnumber)
 }
 
-func refOnum(onum objectnumber) string {
-	return fmt.Sprintf("%d 0 R", onum)
-}
+// Used for subsetting the fonts
+type charSubset []rune
 
-type RuneSlice []rune
+func (p charSubset) Len() int           { return len(p) }
+func (p charSubset) Less(i, j int) bool { return p[i] < p[j] }
+func (p charSubset) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
-func (p RuneSlice) Len() int           { return len(p) }
-func (p RuneSlice) Less(i, j int) bool { return p[i] < p[j] }
-func (p RuneSlice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-
-// Writes the font file to the PDF. The font should be sub-setted, therefore we know the requirements only the end of the PDF file.
-func (fnt *PDFFont) finish() error {
-	switch guessFonttype(fnt.filename) {
+// finish writes the font file to the PDF. The font should be sub-setted, therefore we know the requirements only the end of the PDF file.
+func (fnt *Font) finish() error {
+	switch fnt.fonttype() {
 	case TYPE1:
 		t1, err := type1.LoadFont(fnt.filename, "")
 		if err != nil {
 			return nil
 		}
 
-		usedChars := make(RuneSlice, len(fnt.usedChar))
+		subset := make(charSubset, len(fnt.usedChar))
 		i := 0
 		for g := range fnt.usedChar {
-			usedChars[i] = g
+			subset[i] = g
 			i++
 		}
-		sort.Sort(usedChars)
-		charset, err := t1.Subset("AAAAAA", usedChars)
+		sort.Sort(subset)
+		charset, err := t1.Subset(subset)
 		if err != nil {
 			return err
 		}
 
-		st := NewPDFStream(bytes.Join(t1.Segments, nil))
+		st := NewStream(bytes.Join(t1.Segments, nil))
 		st.dict = Dict{
 			"/Length1": fmt.Sprintf("%d", len(t1.Segments[0])),
 			"/Length2": fmt.Sprintf("%d", len(t1.Segments[1])),
@@ -75,11 +75,10 @@ func (fnt *PDFFont) finish() error {
 		pw := fnt.pw
 		fontfileObjectNumber := pw.writeStream(st)
 
-		fontdescriptor := pw.NewPDFObject()
-		fmt.Println(t1.FontBBox)
+		fontdescriptor := pw.NewObject()
 		fontdescriptor.Dict(Dict{
 			"/Type":        "/FontDescriptor",
-			"/FontName":    "/AAAAAA+" + t1.FontName,
+			"/FontName":    "/" + t1.SubsetID + "+" + t1.FontName,
 			"/Flags":       "4",
 			"/FontBBox":    fmt.Sprintf("[ %d %d %d %d ]", t1.FontBBox[0], t1.FontBBox[1], t1.FontBBox[2], t1.FontBBox[3]),
 			"/ItalicAngle": fmt.Sprintf("%d", t1.ItalicAngle),
@@ -88,7 +87,7 @@ func (fnt *PDFFont) finish() error {
 			"/CapHeight":   fmt.Sprintf("%d", t1.CapHeight),
 			"/XHeight":     fmt.Sprintf("%d", t1.XHeight),
 			"/StemV":       fmt.Sprintf("%d", 0),
-			"/FontFile":    refOnum(fontfileObjectNumber),
+			"/FontFile":    fontfileObjectNumber.ref(),
 			"/CharSet":     fmt.Sprintf("(%s)", charset),
 		})
 		fontdescriptor.Save()
@@ -96,7 +95,7 @@ func (fnt *PDFFont) finish() error {
 		fontObj := fnt.fontobject
 
 		widths := []string{"["}
-		for i := usedChars[0]; i <= usedChars[len(usedChars)-1]; i++ {
+		for i := subset[0]; i <= subset[len(subset)-1]; i++ {
 			widths = append(widths, fmt.Sprintf("%d", t1.CharsCodepoint[i].Wx))
 		}
 		widths = append(widths, "]")
@@ -104,11 +103,11 @@ func (fnt *PDFFont) finish() error {
 		fdict := Dict{
 			"/Type":           "/Font",
 			"/Subtype":        "/Type1",
-			"/BaseFont":       "/AAAAAA+" + t1.FontName,
-			"/FirstChar":      fmt.Sprintf("%d", usedChars[0]),
-			"/LastChar":       fmt.Sprintf("%d", usedChars[len(usedChars)-1]),
+			"/BaseFont":       "/" + t1.SubsetID + "+" + t1.FontName,
+			"/FirstChar":      fmt.Sprintf("%d", subset[0]),
+			"/LastChar":       fmt.Sprintf("%d", subset[len(subset)-1]),
 			"/Widths":         wd,
-			"/FontDescriptor": refOnum(fontdescriptor.ObjectNumber),
+			"/FontDescriptor": fontdescriptor.ObjectNumber.ref(),
 		}
 		fontObj.Dict(fdict)
 		fontObj.Save()
@@ -116,13 +115,13 @@ func (fnt *PDFFont) finish() error {
 	return nil
 }
 
-// NewPDFFont registers a font for use in the PDF file.
-func (pw *Writer) NewPDFFont(filename string) *PDFFont {
-	f := &PDFFont{}
+// NewFont registers a font for use in the PDF file.
+func (pw *PDF) NewFont(filename string) *Font {
+	f := &Font{}
 	f.usedChar = make(map[rune]bool)
 	f.pw = pw
 	f.InternalName = newInternalFontName()
-	f.fontobject = pw.NewPDFObject()
+	f.fontobject = pw.NewObject()
 	f.filename = filename
 	pw.fonts = append(pw.fonts, f)
 	return f
